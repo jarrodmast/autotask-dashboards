@@ -25,10 +25,12 @@
 		 */
 		public function execute() {
 
+			$this->TimeConverter = $this->Tasks->load( 'Autotask.TimeConverter' );
+
 			$oResult = $this->Ticket->findInAutotask( 'closed', array(
 					'conditions' => array(
 							'IsThisDay' => array(
-								'CompletedDate' => date( 'Y-m-d' )
+								'CompletedDate' => $this->TimeConverter->convertToAutotaskTimezone( date( 'Y-m-d' ) )
 							)
 						,	'Equals' => array(
 								'QueueID' => Hash::extract( $this->Dashboardqueue->find( 'all' ), '{n}.Dashboardqueue.queue_id' )

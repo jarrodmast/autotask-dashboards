@@ -19,11 +19,13 @@
 
 		public function execute() {
 
+			$this->TimeConverter = $this->Tasks->load( 'Autotask.TimeConverter' );
+
 			// We only fetch open tickets that go back 1 year (default).
 			// This prevents recurring tickets from being included, which often leads
 			// to insane amount of tickets.
 			$aDates = array(
-					date( 'Y-m-d' )
+					$this->TimeConverter->convertToAutotaskTimezone( date( 'Y-m-d' ) )
 			);
 
 			if( !$iAmountOfDays = Configure::read( 'Import.OpenTickets.history' ) ) {
@@ -31,7 +33,7 @@
 			}
 
 			for ( $i=1; $i <= $iAmountOfDays; $i++ ) { 
-				$aDates[] = date( 'Y-m-d', strtotime( '-' . $i . ' days' ) );
+				$aDates[] = $this->TimeConverter->convertToAutotaskTimezone( date( 'Y-m-d', strtotime( '-' . $i . ' days' ) ) );
 			}
 			// End
 

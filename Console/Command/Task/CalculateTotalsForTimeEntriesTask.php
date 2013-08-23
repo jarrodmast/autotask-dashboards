@@ -60,7 +60,7 @@
 			$oResult = $this->Timeentry->findInAutotask( 'all', array(
 					'conditions' => array(
 							'IsThisDay' => array(
-								'DateWorked' => date( 'Y-m-d' )
+								'DateWorked' => $this->TimeConverter->convertToAutotaskTimezone( date( 'Y-m-d' ) )
 							)
 					)
 			) );
