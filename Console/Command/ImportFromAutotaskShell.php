@@ -10,6 +10,10 @@
 	 * @license       MIT License (http://opensource.org/licenses/mit-license.php)
 	 * @author        Coen Coppens <coen@campai.nl>
 	 */
+
+//App::import('Vendor', 'Autotask.atws', true, array(), 'atws'.DA.'php-atws.php');
+require_once(dirname(dirname(__DIR__)).DIRECTORY_SEPARATOR.'Vendor'.DIRECTORY_SEPARATOR.'atws'.DIRECTORY_SEPARATOR.'php-atws.php');
+
 	class ImportFromAutotaskShell extends AppShell {
 
 		public $uses = array(
@@ -32,57 +36,78 @@
 			,	'Autotask.CalculateTotalsForTimeEntries'
 		);
 
-		public function main() {
 
-			$bErrorsEncountered = false;
-
+		public function log($sMessage,$iLevel = 0) {
 			if( !$this->iLogLevel = Configure::read( 'Import.logLevel' ) ) {
 				$this->iLogLevel = 0;
+				parent::log('log level set to:'.$this->iLogLevel,'cronjob');
+			}			
+			if( $iLevel <= $this->iLogLevel ) {
+				parent::log($sMessage, 'cronjob');	
 			}
+		}
+		public function main() {
+			
+			$bErrorsEncountered = false;
+			$this->connectAutotask();
+			$this->checkConnectAutotask();
 
-			if( 0 < $this->iLogLevel ) {
-				$this->log( 'Starting with the import.', 'cronjob' );
-			}
+			$this->log( 'Starting with the import.' );
 
-			// First we must make sure we can login. We do this by performing a dummy call and see what it returns.
-			$oResult = $this->Ticket->findInAutotask( 'open', array(
-					'conditions' => array(
-							'IsThisDay' => array(
-								'CreateDate' => date( 'Y-m-d' )
-							)
-					)
-			) );
 
-			if( false === $oResult ) {
-				$bErrorsEncountered = true;
+			// First we must make sure we can login. 
+			//We do this by performing an inexpensive call and see what it returns.
+			if( false === $this->connectAutotask() ) {
+				$this->log('Failed to connect to autotask');
+				return;
+			} 
 
-			// Appearantly we can login, so let's get into action!
+			// Apparently we can login, so let's get into action!
+			// may as well do these first so there are none missing
+			// sync picklists
+			$this->__syncPicklistsWithDatabase();
+			// Delete any existing records so we have a clean start.
+			$this->log( '> Truncating tickets table..',1 );
+
+			$this->Ticket->query('TRUNCATE TABLE tickets;');
+
+			$this->log(  ' ..done.',1);
+			// End
+
+			// Import completed tickets
+			$this->log(  '> Importing completed tickets (today) into the database..',1 );
+
+			$oTickets = $this->GetTicketsCompletedToday->execute();
+
+			if( empty( $oTickets ) ) {
+
+				$this->log( ' ..nothing todo - api query returned no tickets completed today.',1 );
+
 			} else {
 
-				// Delete any existing records so we have a clean start.
-				if( 1 < $this->iLogLevel ) {
-					$this->log( '> Truncating tickets table..', 'cronjob' );
+				if( !$this->__saveTicketsToDatabase( $oTickets ) ) {
+
+					$bErrorsEncountered = true;
+
+				} else {
+
+					$this->log(  ' ..imported ' . count( $oTickets ) . ' ticket(s).' ,1);
+
 				}
 
-				$this->Ticket->query('TRUNCATE TABLE tickets;');
+			}
+			// End
 
-				if( 1 < $this->iLogLevel ) {
-					$this->log( ' ..done.', 'cronjob' );
-				}
-				// End
+			if( !$bErrorsEncountered ) {
 
-				// Import completed tickets
-				if( 1 < $this->iLogLevel ) {
-					$this->log( '> Importing completed tickets (today) into the database..', 'cronjob' );
-				}
+				// Import the tickets that have any other status then 'completed'.
+				$this->log(  '> Importing open tickets (today) into the database..',1);
 
-				$oTickets = $this->GetTicketsCompletedToday->execute();
+				$oTickets = $this->GetTicketsOpenToday->execute();
 
 				if( empty( $oTickets ) ) {
 
-					if( 1 < $this->iLogLevel ) {
-						$this->log( ' ..nothing saved - query returned no tickets.', 'cronjob' );
-					}
+					$this->log( ' ..nothing saved - query returned no tickets.',1 );
 
 				} else {
 
@@ -92,148 +117,126 @@
 
 					} else {
 
-						if( 1 < $this->iLogLevel ) {
-							$this->log( ' ..imported ' . count( $oTickets ) . ' ticket(s).', 'cronjob' );
-						}
+							$this->log(  ' ..imported ' . count( $oTickets ) . ' ticket(s).' ,1);
 
 					}
 
 				}
-				// End
 
 				if( !$bErrorsEncountered ) {
 
-					// Import the tickets that have any other status then 'completed'.
-					if( 1 < $this->iLogLevel ) {
-						$this->log( '> Importing open tickets (today) into the database..', 'cronjob' );
+					// Processing of the tickets data into totals for kill rates, queue healths etc.
+					$this->log('> Calculating ticket status totals for all dashboards..',1 );
+
+					$this->CalculateTotalsByTicketStatus->execute();
+
+					$this->log( ' ..done.',1 );
+					$this->log( '> Calculating kill rate totals for all dashboards..' ,1);
+
+					$this->CalculateTotalsForKillRate->execute();
+
+					$this->log( ' ..done.',1 );
+					$this->log( '> Calculating queue health totals for all dashboards..',1 );
+
+					$this->CalculateTotalsForQueueHealth->execute();
+
+					$this->log( ' ..done.' ,1);
+
+					$this->log( '> Importing time entries..',1 );
+
+					if( !$this->CalculateTotalsForTimeEntries->execute() ) {
+						$bErrorsEncountered = true;
 					}
 
-					$oTickets = $this->GetTicketsOpenToday->execute();
+					$this->log(  ' ..done.',1 );
 
-					if( empty( $oTickets ) ) {
+					$this->log( '> Clearing cache for all dashboards..',1 );
 
-						if( 1 < $this->iLogLevel ) {
-							$this->log( ' ..nothing saved - query returned no tickets.', 'cronjob' );
-						}
+
+					if(
+						clearCache() // Clear the view cache
+						&&
+						Cache::clear( null ,'1_hour' ) // Clear the model cache
+					) {
+
+						$this->log(  ' ..done.',1 );
 
 					} else {
 
-						if( !$this->__saveTicketsToDatabase( $oTickets ) ) {
-
-							$bErrorsEncountered = true;
-
-						} else {
-
-							if( 1 < $this->iLogLevel ) {
-								$this->log( ' ..imported ' . count( $oTickets ) . ' ticket(s).', 'cronjob' );
-							}
-
-						}
-
-					}
-
-					if( !$bErrorsEncountered ) {
-
-						// Processing of the tickets data into totals for kill rates, queue healths etc.
-						if( 1 < $this->iLogLevel ) {
-							$this->log( '> Calculating ticket status totals for all dashboards..', 'cronjob' );
-						}
-
-						$this->CalculateTotalsByTicketStatus->execute();
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( ' ..done.', 'cronjob' );
-						}
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( '> Calculating kill rate totals for all dashboards..', 'cronjob' );
-						}
-
-						$this->CalculateTotalsForKillRate->execute();
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( ' ..done.', 'cronjob' );
-						}
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( '> Calculating queue health totals for all dashboards..', 'cronjob' );
-						}
-
-						$this->CalculateTotalsForQueueHealth->execute();
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( ' ..done.', 'cronjob' );
-						}
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( '> Importing time entries..', 'cronjob' );
-						}
-
-						if( !$this->CalculateTotalsForTimeEntries->execute() ) {
-							$bErrorsEncountered = true;
-						}
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( ' ..done.', 'cronjob' );
-						}
-
-						if( 1 < $this->iLogLevel ) {
-							$this->log( '> Clearing cache for all dashboards..', 'cronjob' );
-						}
-
-						if(
-							clearCache() // Clear the view cache
-							&&
-							Cache::clear( null ,'1_hour' ) // Clear the model cache
-						) {
-
-							if( 1 < $this->iLogLevel ) {
-								$this->log( ' ..done.', 'cronjob' );
-							}
-
-						} else {
-
-							$bErrorsEncountered = true;
-							$this->log( ' ..could not delete view cache!', 'cronjob' );
-
-						}
+						$bErrorsEncountered = true;
+						$this->log( ' ..could not delete view cache!' );
 
 					}
 
 				}
 
 			}
+
+
 			// End
 
 			if( $bErrorsEncountered ) {
-				$this->log( 'Failed: we\'ve encountered some errors while running the import script.', 'cronjob' );
+				$this->log( 'Failed: we\'ve encountered some errors while running the import script.' );
 			} else {
 
-				if( 0 < $this->iLogLevel ) {
-					$this->log( 'Success: everything imported correctly.', 'cronjob' );
-				}
+				$this->log( 'Success: everything imported correctly.' );
 
 			}
 
 		}
+
+		private function __syncPicklistsWithDatabase( ) {
+			$aIssueTypes = $this->getAutotaskPicklist( 'Ticket', 'IssueType' );
+			$aSubissueTypes = $this->getAutotaskPicklist('Ticket','SubIssueType');
+			$aQueues = $this->getAutotaskPicklist('Ticket','QueueID');
+			$aTicketstatus = $this->getAutotaskPicklist('Ticket','Status');
+			
+			$this->__savePicklistToModel('Issuetype',$aIssueTypes);
+			$this->__savePicklistToModel('Subissuetype',$aSubissueTypes);
+			$this->__savePicklistToModel('Queue',$aQueues);
+			$this->__savePicklistToModel('Ticketstatus',$aTicketstatus);
+
+		}
+		private function __savePicklistToModel($sModel,$aPicklist) {
+			if(!is_array($aPicklist)) {
+				return false;
+			}
+			$aNewModelRecords = array();
+			foreach ($aPicklist as $iId=>$sName) {
+				$this->log('checking model:'.$sModel.' for name:'.$sName,4);
+				$aModelRecord = $this->$sModel->findByid($iId);
+				if (empty($aModelRecord)) {
+					$this->log('non existing:'.$sModel.' model so inserting:'.$sName.' with id:'.$iId,3);
+					$aNewModelRecords[] = array($sModel=>array('id'=>$iId,'name'=>$sName));
+				}
+				else {
+					if (empty($aModelRecord[$sModel]['name'])) {
+						$this->log('updating '.$sModel.' with id:'.$iId.' which does not have a name. New name:'.$sName,3);
+						$aNewModelRecords[]=array($sModel=>array('id'=>$iId,'name'=>$sName));
+					}
+					else {
+						// allow dashboard settings to change name of picklist item.
+						// set back to empty to resync on next cronjob run
+						$this->log($sModel.':'.$sName.' exists and has name:'.$aModelRecord[$sModel]['name'],4);
+					}
+				}
+			}
+			
+			if (!empty($aNewModelRecords)) {
+				// batch write our model changes
+				$this->$sModel->saveAll($aNewModelRecords);
+			}
+
+		}
+
 
 
 		private function __saveTicketsToDatabase( $oTickets ) {
 
 			if( !empty( $oTickets ) ) {
 
-				// Gets filled up with queries that should get executed.
+				// Gets filled up with ticket model data that should get executed.
 				$aQueries = array();
-				// Gets filled up with the id's of all new records, to prevent duplicate ones.
-				$aIds = array(
-						'Ticket' => array()
-					,	'Account' => array()
-					,	'Resource' => array()
-					,	'Queue' => array()
-					,	'Ticketstatus' => array()
-					,	'Issuetype' => array()
-					,	'Subissuetype' => array()
-				);
 
 				if( 1 == count( $oTickets ) ) {
 
@@ -253,8 +256,8 @@
 						$this->{$sModel}->query( $sQuery );
 					} catch ( Exception $e ) {
 
-						$this->log( '- Could not save the new ' . Inflector::pluralize( $sModel ) . '. MySQL says: "' . $e->errorInfo[2] . '"', 'cronjob' );
-						$this->log( '- ' . $sQuery, 'cronjob' );
+						$this->log( '- Could not save the new ' . Inflector::pluralize( $sModel ) . '. MySQL says: "' . $e->errorInfo[2] . '"' );
+						$this->log( '- ' . $sQuery );
 						return false;
 
 					}
@@ -267,6 +270,80 @@
 
 		}
 
+		/**
+		 * 
+		 * @param  string $sType  'open', 'waitingCustomer' 
+		 * @param  array  $aQuery [description]
+		 * 
+		 * @return object
+		 */
+		public function findInAutotask( $sType = 'open', $aQuery = array() ) {
+
+			switch ( $sType ) {
+
+				case 'open':
+					return $this->_findOpenInAutotask( $aQuery );
+				break;
+
+				case 'closed':
+					return $this->_findClosedInAutotask( $aQuery );
+				break;
+
+				case 'waitingCustomer':
+					return $this->_findWaitingCustomerInAutotask( $aQuery );
+				break;
+
+				default:
+					return false;
+				break;
+			}
+
+		}
+
+		private function _findOpenInAutotask( $query ) {
+
+			if (!is_a($query,'atws\atwsquery')) {
+				$query = $this->oAutotask->getNewQuery();
+				$query->FROM('Ticket')->WHERE('Status',$query->NotEqual,5);				
+			}
+			return $this->oAutotask->getQueryResults( $query );
+		}
+		
+		private function _findStatusInAutotask( $status ) {
+			
+			$query = $this->oAutotask->getNewQuery();
+			$query->FROM('Ticket')->WHERE('Status',$query->Equals,$status);				
+			return $this->oAutotask->getQueryResults( $query );
+
+		}
+
+		private function _findWaitingCustomerInAutotask( Array $aQuery ) {
+
+			if (!is_a($query,'atws\atwsquery')) {
+				$query = $this->oAutotask->getNewQuery();
+				$query->FROM('Ticket')->WHERE('Status',$query->Equals,7);				
+			}
+			return $this->oAutotask->getQueryResults( $query );
+
+		}
+		
+		private function _findClosedInAutotask( Array $aQuery ) {
+
+			$aConditions = array(
+					'Equals' => array(
+							'Status' => 5
+					)
+			);
+
+			if( !empty( $aQuery['conditions'] ) ) {
+				$aQuery['conditions'] = array_merge_recursive( $aQuery['conditions'], $aConditions );
+			} else {
+				$aQuery['conditions'] = $aConditions;
+			}
+
+			return $this->queryAutotask( 'Ticket', $aQuery );
+
+		}
 
 		/**
 		 * Rebuilds the response from the Autotask API into a set of MySQL insert queries.
@@ -279,7 +356,7 @@
 		 * @param  array $aIds - The (referenced) array with the id's of any new records. Helps you prevent duplicate id's.
 		 * @return -
 		 */
-		private function __rebuildAPIResponseToSaveData( $oTicket, &$aQueries, &$aIds ) {
+		private function __rebuildTicketToModelDataArray( $oTicket, &$aQueries, &$aIds ) {
 
 			// Defaults
 			$sCompletedDate = '';
@@ -293,6 +370,9 @@
 			// End
 
 			// Reformat the dates to your own timezone.
+			// @todo: rewrite autotask objects to have dates.
+			// 		  then getQueryResults function can convert date based on time zone so objects
+			// 		  returned automatically have the right date
 			$sCreateDate = $this->TimeConverter->convertToOwnTimezone( $oTicket->CreateDate );
 
 			if( !empty( $oTicket->CompletedDate ) ) {
@@ -385,6 +465,7 @@
 					if( !empty( $oResource->FirstName ) ) {
 						$sResourceName .= $oResource->LastName;
 					}
+					
 
 					if( empty( $aQueries['Resource'] ) ) {
 						$aQueries['Resource'] = "INSERT INTO resources (id, name ) VALUES ";
@@ -399,9 +480,7 @@
 
 					$aIds['Resource'][] = $iResourceId;
 
-					if( 3 < $this->iLogLevel ) {
-						$this->log( '  - Found new Resource => Inserted into the database ("' . $sResourceName . '").', 'cronjob' );
-					}
+					$this->log( '  - Found new Resource => Inserted into the database ("' . $sResourceName . '").' ,3);
 
 				}
 
@@ -433,9 +512,7 @@
 
 					$aIds['Queue'][] = $iQueueId;
 
-					if( 3 < $this->iLogLevel ) {
-						$this->log( '  - Found new Queue => Inserted into the database (id ' . $iQueueId . ').', 'cronjob' );
-					}
+					$this->log( '  - Found new Queue => Inserted into the database (id ' . $iQueueId . ').' ,3);
 
 				}
 
@@ -464,9 +541,7 @@
 
 				$aIds['Ticketstatus'][] = $oTicket->Status;
 
-				if( 3 < $this->iLogLevel ) {
-					$this->log( '  - Found new Ticket Status => Inserted into the database (id ' . $oTicket->Status . ').', 'cronjob' );
-				}
+				$this->log('  - Found new Ticket Status => Inserted into the database (id ' . $oTicket->Status . ').' ,3);
 
 			}
 			// End
@@ -503,9 +578,7 @@
 
 					$aIds['Account'][] = $oTicket->AccountID;
 
-					if( 3 < $this->iLogLevel ) {
-						$this->log( '  - Found new Account => Inserted into the database ("' . $oAccount->AccountName . '").', 'cronjob' );
-					}
+					$this->log( '  - Found new Account => Inserted into the database ("' . $oAccount->AccountName . '").' ,3);
 
 				}
 
@@ -535,9 +608,7 @@
 
 					$aIds['Issuetype'][] = $oTicket->IssueType;
 
-					if( 3 < $this->iLogLevel ) {
-						$this->log( '  - Found new Issue Type => Inserted into the database (id ' . $oTicket->IssueType . ').', 'cronjob' );
-					}
+						$this->log(  '  - Found new Issue Type => Inserted into the database (id ' . $oTicket->IssueType . ').',3 );
 
 				}
 
@@ -567,9 +638,7 @@
 
 					$aIds['Subissuetype'][] = $oTicket->SubIssueType;
 
-					if( 3 < $this->iLogLevel ) {
-						$this->log( '  - Found new Sub Issue Type => Inserted into the database (id ' . $oTicket->SubIssueType . ').', 'cronjob' );
-					}
+					$this->log( '  - Found new Sub Issue Type => Inserted into the database (id ' . $oTicket->SubIssueType . ').' ,3);
 
 				}
 
@@ -577,5 +646,100 @@
 			// End
 
 		}
+
+
+// finished below
+
+
+		public function getAutotaskPicklist( $sEntity, $sPicklist ) {
+			if($this->connectAutotask() !== true ) {
+				return false;
+			}
+			$aPicklistResult = $this->oAutotask->getPicklist($sEntity, $sPicklist);
+			
+			if(is_array($aPicklistResult)) {
+				return $aPicklistResult;
+			}
+			else {
+				$this->log('failed to get picklist:'.$sPicklist.' for entity:'.$sEntity);
+				if(isset($this->oAutotask->last_picklist_fault)) {
+					$this->log('soapfault:'.$this->oAutotask->last_picklist_fault);
+				}
+				return false;
+			}
+		}
+
+		private function getAutotaskLogin() {
+			
+			$aLogin = array(
+					'login' => Configure::read( 'Autotask.username' )
+				,	'password' => Configure::read( 'Autotask.password' )
+				,	'location' => Configure::read( 'Autotask.wsdl' )
+			);
+
+			if(
+				empty( $aLogin['login'] )
+				||
+				empty( $aLogin['password'] )
+				||
+				empty( $aLogin['location'] )
+			) {
+
+				$this->log( 'I\'m not able to use the Autotask API if you don\'t provide your credentials (/var/www/app/Plugin/Autotask/Config/bootstrap.php).', 'cronjob' );
+				$this->log( 'I\'m not able to use the Autotask API if you don\'t provide your credentials (/var/www/app/Plugin/Autotask/Config/bootstrap.php).', 'error' );
+				return false;
+
+			}
+			return $aLogin;
+			
+		}
+		public function checkConnectAutotask() {
+			
+			$oResponse = $this->oAutotask->client->getThresholdAndUsageInfo();
+			if(empty($oResponse->getThresholdAndUsageInfoResult->EntityReturnInfoResults->EntityReturnInfo->Message)) {
+				return false;
+			}
+			if(strpos($oResponse->getThresholdAndUsageInfoResult->EntityReturnInfoResults->EntityReturnInfo->Message, 'TimeframeOfLimitation')) {
+				return true;
+			}
+			return false;
+		}
+		public function connectAutotask() {
+			if(isset($this->oAutotask)) {
+				if(is_object($this->oAutotask)) {
+					return true;
+				}
+			}
+			
+			$aLogin = $this->getAutotaskLogin();
+			if ($aLogin == false) { 
+				return false;
+			}
+			if ( !extension_loaded( 'soap' ) ) {
+				$this->log( 'SOAP is not available, unable to perform requests to the Autotask API.', 'cronjob' );
+				$this->log( 'SOAP is not available, unable to perform requests to the Autotask API.', 'error' );
+				exit();
+			}
+			// setup the atws object
+			$this->oAutotask = new atws\atws();
+			if ($this->oAutotask->connect($aLogin['location'],$aLogin['login'],$aLogin['password'])) {
+				if ($this->checkConnectAutotask() === true) {
+					return true;
+				}
+				else {
+					unset($this->oAutotask);
+					$this->log('autotask connected but simple check failed');
+					return false;
+				}				
+			}
+			else {
+				$this->log('could not connect to autotask');
+				if(isset($this->oAutotask->last_connect_fault)) {
+					$this->log($this->oAutotask->last_connect_fault);
+				}
+			}
+
+		}
+
 
 	}
